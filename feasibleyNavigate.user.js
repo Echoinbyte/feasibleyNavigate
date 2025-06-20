@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Feasibly Use the Web
 // @namespace    http://github.com/Echoinbyte/
-// @version      2.0
+// @version      3.0
 // @description  A highly performant, beautiful, and dynamic heading navigation menu with virtualization.
 // @author       Echoinbyte
 // @match        *://*/*
@@ -204,17 +204,33 @@
       document.addEventListener("keydown", (e) => {
         if (e.altKey && e.key.toLowerCase() === "h") {
           e.preventDefault();
-          console.log("Alt+H pressed - should focus navigation");
+          if (UIManager.elements.nav) {
+            if (
+              !UIManager.isCollapsed &&
+              UIManager.core.filteredHeadings.length > 0
+            ) {
+              UIManager.elements.list.focus();
+              UIManager.virtualScroll.focusedIndex = 0;
+              UIManager.ensureIndexIsVisible(0);
+              UIManager.updateVirtualScroll();
+            } else {
+              UIManager.elements.nav.focus();
+            }
+          }
         }
 
         if (e.altKey && e.key.toLowerCase() === "n") {
           e.preventDefault();
-          console.log("Alt+N pressed - should focus filter");
+          if (UIManager.elements.filterInput && !UIManager.isCollapsed) {
+            UIManager.elements.filterInput.focus();
+          }
         }
 
         if (e.altKey && e.key.toLowerCase() === "t") {
           e.preventDefault();
-          console.log("Alt+T pressed - should toggle navigation");
+          if (UIManager.elements.toggleBtn) {
+            UIManager.elements.toggleBtn.click();
+          }
         }
       });
 
@@ -239,11 +255,13 @@
     },
   };
 
-  // --- UI Manager: Manages all DOM elements and basic rendering ---
+  // --- UI Manager: Manages all DOM elements and interactions ---
   const UIManager = {
     core: null,
     elements: {},
     isCollapsed: false,
+    dragState: { isDragging: false, x: 0, y: 0, initialX: 0, initialY: 0 },
+    virtualScroll: { scrollTop: 0, focusedIndex: -1 },
 
     init(coreInstance) {
       this.core = coreInstance;
@@ -251,11 +269,17 @@
         localStorage.getItem("feasible-nav-collapsed") === "true";
       this.createStyles();
       this.createContainer();
+      this.setupCoreEventListeners();
+      this.applyInitialState();
+      this.applyPersistedState();
     },
 
     render(headings) {
-      // Basic rendering - updates the list with current headings
-      this.updateList(headings);
+      this.virtualScroll.itemCount = headings.length;
+      this.elements.listSizer.style.height = `${
+        headings.length * CONFIG.virtualization.itemHeight
+      }px`;
+      this.updateVirtualScroll();
     },
 
     getStyleSheet(colors) {
@@ -277,29 +301,35 @@
         .feasible-title-icon { font-size: 20px; user-select: none; }
         .feasible-title { margin: 0; font-size: 16px; font-weight: 600; color: ${colors.menuText}; white-space: nowrap; }
         .feasible-header button {
-          color: ${colors.menuTextSecondary}; background: transparent; border: none; font-size: 24px;
-          cursor: pointer; padding: 0 4px; display: flex; align-items: center; justify-content: center;
-          width: 32px; height: 32px; line-height: 1;
+          color: ${colors.menuTextSecondary};
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          width: 32px;
+          height: 32px;
+          line-height: 1;
         }
         .feasible-filter-input {
-          width: calc(100% - 32px); padding: 8px 12px; margin: 8px 16px; border-radius: 6px; 
-          border: 1px solid ${colors.menuBorder}; background-color: ${colors.menuBackground}; 
-          color: ${colors.menuText}; font-size: 13px; transition: border-color 0.2s ease;
-          box-sizing: border-box; flex-shrink: 0;
+            width: calc(100% - 32px); padding: 8px 12px; margin: 8px 16px; border-radius: 6px; border: 1px solid ${colors.menuBorder};
+            background-color: ${colors.menuBackground}; color: ${colors.menuText}; font-size: 13px; transition: border-color 0.2s ease;
+            box-sizing: border-box; flex-shrink: 0;
         }
         .feasible-filter-input:focus { border-color: ${colors.accent}; outline: none; }
-        .feasible-content { flex-grow: 1; overflow-y: auto; scroll-behavior: smooth; }
+        .feasible-content { flex-grow: 1; overflow-y: auto; scroll-behavior: smooth; position: relative; }
         .feasible-content::-webkit-scrollbar { width: 8px; }
         .feasible-content::-webkit-scrollbar-track { background: transparent; }
         .feasible-content::-webkit-scrollbar-thumb { background: ${colors.scrollbar}; border-radius: 4px; }
         .feasible-content::-webkit-scrollbar-thumb:hover { background: ${colors.scrollbarHover}; }
-        .feasible-list { list-style: none; margin: 0; padding: 0; }
+        .feasible-list { list-style: none; margin: 0; padding: 0; position: relative; }
         .feasible-list-item {
-          display: flex; align-items: center; padding: 8px 16px;
+          position: absolute; top: 0; left: 0; width: 100%; height: ${CONFIG.virtualization.itemHeight}px;
+          display: flex; align-items: center; padding: 0 16px;
           color: ${colors.menuText}; text-decoration: none;
-          transition: background-color 0.2s ease; cursor: pointer;
+          transition: background-color 0.2s ease, border 0.2s ease; border: 1px solid transparent;
+          cursor: pointer; box-sizing: border-box;
         }
         .feasible-list-item.active { background-color: ${colors.menuActive}; font-weight: 600; }
+        .feasible-list-item.focused { border-color: ${colors.focusOutline}; }
         .feasible-list-item:hover { background-color: ${colors.menuHover}; }
         .item-number {
           font-size: 11px; font-weight: bold; text-align: center; line-height: 18px;
@@ -318,6 +348,7 @@
     createContainer() {
       const nav = document.createElement("nav");
       nav.id = "feasible-heading-nav";
+      nav.setAttribute("tabindex", "1"); // Make it first in tab order
       nav.setAttribute("role", "navigation");
       nav.setAttribute("aria-label", "Page headings navigation");
       this.elements.nav = nav;
@@ -330,9 +361,6 @@
       nav.appendChild(filter);
       nav.appendChild(content);
       document.body.appendChild(nav);
-
-      this.setupBasicEventListeners();
-      this.applyCollapseState();
     },
 
     createHeader() {
@@ -347,7 +375,9 @@
 
       const toggleBtn = document.createElement("button");
       toggleBtn.setAttribute("aria-label", "Collapse navigation");
-      toggleBtn.innerHTML = "−";
+      toggleBtn.setAttribute("tabindex", "2");
+      toggleBtn.setAttribute("title", "Toggle navigation (Alt+T)");
+      toggleBtn.style.cssText = `background: transparent; border: none; font-size: 24px; cursor: pointer; padding: 0 4px;`;
       this.elements.toggleBtn = toggleBtn;
 
       header.appendChild(titleContainer);
@@ -360,7 +390,9 @@
       filterInput.type = "text";
       filterInput.placeholder = "Navigate to...";
       filterInput.className = "feasible-filter-input";
+      filterInput.setAttribute("tabindex", "3");
       filterInput.setAttribute("aria-label", "Filter headings");
+      filterInput.setAttribute("title", "Search headings (Alt+N)");
       this.elements.filterInput = filterInput;
       return filterInput;
     },
@@ -370,21 +402,60 @@
       content.className = "feasible-content";
       this.elements.content = content;
 
+      const listSizer = document.createElement("div");
+      listSizer.style.cssText =
+        "position: relative; width: 100%; height: 0; z-index: 0;";
+      this.elements.listSizer = listSizer;
+
       const list = document.createElement("ul");
       list.className = "feasible-list";
       list.setAttribute("role", "menu");
+      list.setAttribute("tabindex", "4");
+      list.setAttribute("aria-label", "Headings list");
+      list.setAttribute("title", "Navigate headings (Alt+H)");
       this.elements.list = list;
 
-      content.appendChild(list);
+      listSizer.appendChild(list);
+      content.appendChild(listSizer);
       return content;
     },
 
-    updateList(headings) {
-      const list = this.elements.list;
-      list.innerHTML = "";
+    updateVirtualScroll() {
+      const { content, list } = this.elements;
+      const { itemHeight, buffer } = CONFIG.virtualization;
+      const itemCount = this.core.filteredHeadings.length;
 
-      headings.forEach((heading) => {
+      const startIndex = Math.max(
+        0,
+        Math.floor(this.virtualScroll.scrollTop / itemHeight) - buffer
+      );
+      const endIndex = Math.min(
+        itemCount,
+        Math.ceil(
+          (this.virtualScroll.scrollTop + content.clientHeight) / itemHeight
+        ) + buffer
+      );
+
+      const visibleItems = this.core.filteredHeadings.slice(
+        startIndex,
+        endIndex
+      );
+
+      list.innerHTML = ""; // Clear for simplicity, advanced recycling is more complex
+
+      visibleItems.forEach((heading, i) => {
+        const index = startIndex + i;
+        const top = index * itemHeight;
         const li = this.createListItem(heading);
+        li.style.transform = `translateY(${top}px)`;
+
+        if (index === this.virtualScroll.focusedIndex) {
+          li.classList.add("focused");
+          li.setAttribute("aria-selected", "true");
+        } else {
+          li.setAttribute("aria-selected", "false");
+        }
+
         list.appendChild(li);
       });
     },
@@ -394,6 +465,8 @@
       li.className = "feasible-list-item";
       li.dataset.id = heading.id;
       li.setAttribute("role", "menuitem");
+      li.setAttribute("tabindex", "-1");
+      li.setAttribute("title", `${heading.text} (Level ${heading.level})`);
 
       const level = heading.level;
       const indent = (level - 1) * 15;
@@ -410,44 +483,302 @@
       const color = colors[level - 1] || colors[5];
 
       li.innerHTML = `
-        <span class="item-number" style="background-color: ${color};">${heading.number}</span>
-        <span class="item-text">${heading.text}</span>
-      `;
-
+            <span class="item-number" style="background-color: ${color};">${heading.number}</span>
+            <span class="item-text">${heading.text}</span>
+        `;
       return li;
     },
 
-    setupBasicEventListeners() {
-      // Toggle collapse functionality
+    setupCoreEventListeners() {
+      // Dragging
+      this.elements.header.addEventListener("mousedown", (e) => {
+        if (e.target.tagName === "BUTTON") return;
+        e.preventDefault();
+        this.dragState.isDragging = true;
+        this.dragState.initialX = e.clientX - this.dragState.x;
+        this.dragState.initialY = e.clientY - this.dragState.y;
+        this.elements.header.style.cursor = "grabbing";
+        document.body.style.userSelect = "none";
+      });
+      document.addEventListener("mousemove", (e) => {
+        if (!this.dragState.isDragging) return;
+        this.dragState.x = e.clientX - this.dragState.initialX;
+        this.dragState.y = e.clientY - this.dragState.initialY;
+        this.elements.nav.style.transform = `translate(${this.dragState.x}px, ${this.dragState.y}px)`;
+      });
+      document.addEventListener("mouseup", () => {
+        if (this.dragState.isDragging) {
+          this.dragState.isDragging = false;
+          this.elements.header.style.cursor = "grab";
+          document.body.style.userSelect = "";
+          localStorage.setItem(
+            "feasible-nav-position",
+            JSON.stringify({ x: this.dragState.x, y: this.dragState.y })
+          );
+        }
+      });
+
+      // Collapse
       this.elements.toggleBtn.addEventListener("click", () => {
         this.isCollapsed = !this.isCollapsed;
         localStorage.setItem("feasible-nav-collapsed", this.isCollapsed);
         this.applyCollapseState();
       });
 
-      // Filter functionality
+      // Main navigation keyboard controls
+      this.elements.nav.addEventListener("keydown", (e) => {
+        const { key } = e;
+
+        // Handle Escape key to focus the navigation
+        if (key === "Escape") {
+          e.preventDefault();
+          this.elements.nav.focus();
+          return;
+        }
+
+        // Handle arrow keys to navigate to list when on nav
+        if (key === "ArrowDown" && this.core.filteredHeadings.length > 0) {
+          e.preventDefault();
+          this.elements.list.focus();
+          if (this.virtualScroll.focusedIndex === -1) {
+            this.virtualScroll.focusedIndex = 0;
+            this.ensureIndexIsVisible(0);
+            this.updateVirtualScroll();
+          }
+          return;
+        }
+      });
+
+      // Toggle button keyboard controls
+      this.elements.toggleBtn.addEventListener("keydown", (e) => {
+        if (e.key === "Enter" || e.key === " ") {
+          e.preventDefault();
+          this.elements.toggleBtn.click();
+        }
+      });
+
+      // TODO: Add support for custom filter shortcuts
+      this.elements.filterInput.addEventListener("keydown", (e) => {
+        if (e.key === "Tab" && !e.shiftKey) {
+          return;
+        }
+
+        if (e.key === "ArrowDown") {
+          e.preventDefault();
+          this.elements.list.focus();
+          if (
+            this.virtualScroll.focusedIndex === -1 &&
+            this.core.filteredHeadings.length > 0
+          ) {
+            this.virtualScroll.focusedIndex = 0;
+            this.ensureIndexIsVisible(0);
+            this.updateVirtualScroll();
+          }
+        }
+
+        if (e.key === "Enter") {
+          e.preventDefault();
+          if (this.core.filteredHeadings.length > 0) {
+            const firstHeading = this.core.filteredHeadings[0];
+            const targetElement = document.getElementById(firstHeading.id);
+            if (targetElement) {
+              this.updateActiveLink(firstHeading.id);
+              this.scrollToAndHighlight(targetElement);
+            }
+          }
+        }
+
+        if (e.key === "Escape") {
+          e.preventDefault();
+          this.elements.filterInput.value = "";
+          this.core.filterHeadings("");
+          this.elements.nav.focus();
+        }
+      });
+
+      // Virtual Scroll
+      this.elements.content.addEventListener(
+        "scroll",
+        (e) => {
+          this.virtualScroll.scrollTop = e.target.scrollTop;
+          requestAnimationFrame(() => this.updateVirtualScroll());
+        },
+        { passive: true }
+      );
+
+      // Filter
       this.elements.filterInput.addEventListener("input", (e) => {
         this.core.filterHeadings(e.target.value);
       });
 
-      // Basic click navigation
+      // Keyboard navigation for headings list
+      this.elements.list.addEventListener("keydown", (e) => {
+        const { key } = e;
+        const allowedKeys = [
+          "ArrowUp",
+          "ArrowDown",
+          "Enter",
+          " ",
+          "Home",
+          "End",
+          "PageUp",
+          "PageDown",
+          "Escape",
+          "Tab",
+        ];
+
+        if (!allowedKeys.includes(key)) return;
+
+        e.preventDefault();
+        const count = this.core.filteredHeadings.length;
+        if (count === 0) return;
+
+        let { focusedIndex } = this.virtualScroll;
+
+        // Initialize focused index if not set
+        if (focusedIndex === -1) {
+          focusedIndex = 0;
+        }
+
+        switch (key) {
+          case "ArrowDown":
+            focusedIndex = (focusedIndex + 1) % count;
+            break;
+          case "ArrowUp":
+            focusedIndex = (focusedIndex - 1 + count) % count;
+            break;
+          case "Home":
+            focusedIndex = 0;
+            break;
+          case "End":
+            focusedIndex = count - 1;
+            break;
+          case "PageDown":
+            focusedIndex = Math.min(count - 1, focusedIndex + 5);
+            break;
+          case "PageUp":
+            focusedIndex = Math.max(0, focusedIndex - 5);
+            break;
+          case "Enter":
+          case " ":
+            if (focusedIndex !== -1) {
+              const heading = this.core.filteredHeadings[focusedIndex];
+              const targetElement = document.getElementById(heading.id);
+              if (targetElement) {
+                this.updateActiveLink(heading.id);
+                this.scrollToAndHighlight(targetElement);
+              }
+            }
+            return;
+          case "Escape":
+            this.elements.nav.focus();
+            return;
+          case "Tab":
+            if (e.shiftKey) {
+              this.elements.filterInput.focus();
+            } else {
+              // Allow tab to leave the navigation
+              this.elements.nav.blur();
+            }
+            return;
+        }
+
+        this.virtualScroll.focusedIndex = focusedIndex;
+        this.ensureIndexIsVisible(focusedIndex);
+        this.updateVirtualScroll();
+      });
+
+      // Event Delegation for list items
       this.elements.list.addEventListener("click", (e) => {
         const item = e.target.closest(".feasible-list-item");
         if (!item) return;
-
         const targetId = item.dataset.id;
         const targetElement = document.getElementById(targetId);
         if (targetElement) {
+          // Immediately update the active link to provide instant feedback
           this.updateActiveLink(targetId);
-          targetElement.scrollIntoView({ behavior: "smooth", block: "start" });
+          this.scrollToAndHighlight(targetElement);
         }
       });
+    },
+
+    scrollToAndHighlight(element) {
+      const originalStyles = {
+        textDecoration: element.style.textDecoration,
+        textDecorationColor: element.style.textDecorationColor,
+        transition: element.style.transition,
+      };
+
+      element.style.transition = "text-decoration-color 2s ease-out";
+      element.style.textDecoration = `underline solid ${CONFIG.colors.accent} 2px`;
+
+      setTimeout(() => {
+        element.style.textDecorationColor = "transparent";
+      }, 200);
+
+      setTimeout(() => {
+        element.style.textDecoration = originalStyles.textDecoration;
+        element.style.textDecorationColor = originalStyles.textDecorationColor;
+        element.style.transition = originalStyles.transition;
+      }, 2200);
+
+      element.scrollIntoView({ behavior: "auto", block: "start" });
+
+      const observer = new IntersectionObserver(
+        (entries) => {
+          observer.disconnect();
+          const entry = entries[0];
+          if (entry.isIntersecting && entry.boundingClientRect.top < 120) {
+            const offset = 140 - entry.boundingClientRect.top;
+            window.scrollBy({ top: -offset, behavior: "smooth" });
+          }
+        },
+        { rootMargin: "0px 0px -90% 0px" }
+      );
+
+      observer.observe(element);
+    },
+
+    ensureIndexIsVisible(index) {
+      const { content } = this.elements;
+      const { itemHeight } = CONFIG.virtualization;
+      const scrollTop = this.virtualScroll.scrollTop;
+      const listHeight = content.clientHeight;
+
+      const itemTop = index * itemHeight;
+      const itemBottom = itemTop + itemHeight;
+
+      if (itemTop < scrollTop) {
+        content.scrollTop = itemTop;
+      } else if (itemBottom > scrollTop + listHeight) {
+        content.scrollTop = itemBottom - listHeight;
+      }
+    },
+
+    applyPersistedState() {
+      const savedPosition = localStorage.getItem("feasible-nav-position");
+      if (savedPosition) {
+        try {
+          const { x, y } = JSON.parse(savedPosition);
+          if (typeof x === "number" && typeof y === "number") {
+            this.dragState.x = x;
+            this.dragState.y = y;
+            this.elements.nav.style.transform = `translate(${x}px, ${y}px)`;
+          }
+        } catch (e) {
+          console.error("FeasibleNav: Could not parse saved position.", e);
+          localStorage.removeItem("feasible-nav-position");
+        }
+      }
+    },
+
+    applyInitialState() {
+      this.applyCollapseState();
     },
 
     applyCollapseState() {
       const { nav, titleContainer, content, toggleBtn, filterInput } =
         this.elements;
-
       if (this.isCollapsed) {
         titleContainer.style.display = "none";
         content.style.display = "none";
