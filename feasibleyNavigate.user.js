@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Feasibly Use the Web
 // @namespace    http://github.com/Echoinbyte/
-// @version      1.1
+// @version      1.2
 // @description  A highly performant, beautiful, and dynamic heading navigation menu with virtualization.
 // @author       Echoinbyte
 // @match        *://*/*
@@ -52,6 +52,8 @@
 
     run() {
       this.discoverAndUpdateHeadings();
+      this.setupObservers();
+      this.setupEventListeners();
     },
 
     discoverAndUpdateHeadings(force = false) {
@@ -65,7 +67,7 @@
       if (hasChanged) {
         this.headings = newHeadings;
         this.filteredHeadings = newHeadings;
-        console.log("Headings discovered:", this.headings.length);
+        this.observeVisibleHeadings();
       }
     },
 
@@ -139,12 +141,98 @@
       return headings;
     },
 
+    setupObservers() {
+      this.mutationObserver = new MutationObserver(() => this.scheduleUpdate());
+      this.mutationObserver.observe(document.body, {
+        childList: true,
+        subtree: true,
+      });
+    },
+
+    observeVisibleHeadings() {
+      if (this.scrollObserver) this.scrollObserver.disconnect();
+      if (this.headings.length === 0) return;
+
+      this.scrollObserver = new IntersectionObserver(
+        (entries) => {
+          // Find the most relevant heading to highlight
+          let topMostEntry = null;
+          let topMostPosition = Infinity;
+
+          entries.forEach((entry) => {
+            if (entry.isIntersecting) {
+              const rect = entry.boundingClientRect;
+              // Prioritize headings that are closer to the top of the viewport
+              if (rect.top < topMostPosition && rect.top >= 0) {
+                topMostPosition = rect.top;
+                topMostEntry = entry;
+              }
+            }
+          });
+
+          // Only update the active link if we found a valid entry
+          if (topMostEntry) {
+            console.log("Active heading:", topMostEntry.target.id);
+          }
+        },
+        { rootMargin: "0px 0px -80% 0px", threshold: 0.1 }
+      );
+
+      this.headings.forEach((h) => this.scrollObserver.observe(h.element));
+    },
+
+    scheduleUpdate() {
+      clearTimeout(this.updateTimeout);
+      this.updateTimeout = setTimeout(() => {
+        if (window.location.href !== this.currentUrl) {
+          this.currentUrl = window.location.href;
+          this.discoverAndUpdateHeadings(true); // Force update on URL change
+        } else {
+          this.discoverAndUpdateHeadings();
+        }
+      }, CONFIG.debounceDelay);
+    },
+
+    setupEventListeners() {
+      const schedule = () => this.scheduleUpdate();
+      window.addEventListener("popstate", schedule);
+      window.addEventListener("hashchange", schedule);
+
+      // TODO: Add support for custom keyboard shortcuts
+      document.addEventListener("keydown", (e) => {
+        if (e.altKey && e.key.toLowerCase() === "h") {
+          e.preventDefault();
+          console.log("Alt+H pressed - should focus navigation");
+        }
+
+        if (e.altKey && e.key.toLowerCase() === "n") {
+          e.preventDefault();
+          console.log("Alt+N pressed - should focus filter");
+        }
+
+        if (e.altKey && e.key.toLowerCase() === "t") {
+          e.preventDefault();
+          console.log("Alt+T pressed - should toggle navigation");
+        }
+      });
+
+      const originalPushState = history.pushState;
+      history.pushState = function (...args) {
+        originalPushState.apply(history, args);
+        schedule();
+      };
+      const originalReplaceState = history.replaceState;
+      history.replaceState = function (...args) {
+        originalReplaceState.apply(history, args);
+        schedule();
+      };
+    },
+
     filterHeadings(query) {
       const lowerQuery = query.toLowerCase();
       this.filteredHeadings = this.headings.filter((h) =>
         h.text.toLowerCase().includes(lowerQuery)
       );
-      console.log("Filtered headings:", this.filteredHeadings.length);
     },
   };
 
